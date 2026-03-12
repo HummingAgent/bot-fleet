@@ -38,11 +38,11 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$Name,
 
-    [int64]$RAM = 4GB,
+    [int64]$RAM = 8GB,
 
-    [int]$CPUs = 2,
+    [int]$CPUs = 4,
 
-    [int]$DiskSizeGB = 30,
+    [int]$DiskSizeGB = 100,
 
     [string]$VMPath = "D:\BotFleet",
 
