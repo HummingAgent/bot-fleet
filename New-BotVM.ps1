@@ -9,7 +9,7 @@
     security hardening.
 
 .PARAMETER Name
-    VM name (e.g., "fleet-manager", "sales-bot-01")
+    VM name (e.g., "phoenix", "sales-bot-01")
 
 .PARAMETER RAM
     Memory in bytes. Default: 4GB
@@ -21,16 +21,16 @@
     OS disk size in GB. Default: 30
 
 .PARAMETER VMPath
-    Base path for VM files. Default: C:\HyperV\BotFleet
+    Base path for VM files. Default: D:\BotFleet
 
 .PARAMETER SwitchName
-    Hyper-V virtual switch name. Default: "Default Switch"
+    Hyper-V virtual switch name.
 
 .PARAMETER SSHPublicKey
     SSH public key for the admin user. If not provided, generates a new keypair.
 
 .EXAMPLE
-    .\New-BotVM.ps1 -Name "fleet-manager"
+    .\New-BotVM.ps1 -Name "phoenix"
     .\New-BotVM.ps1 -Name "sales-bot-01" -RAM 2GB -CPUs 2
 #>
 
@@ -54,7 +54,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # ============================================================
-# CONFIG — Edit these paths for your environment
+# CONFIG
 # ============================================================
 $ImageCacheDir = "$VMPath\_images"
 $CloudImageURL = "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
@@ -70,30 +70,40 @@ $SSHKeyDir = "$VMDir\ssh"
 # ============================================================
 # PREREQUISITES CHECK
 # ============================================================
+Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host " Bot Fleet Provisioner" -ForegroundColor Cyan
-Write-Host " Creating: $Name" -ForegroundColor Cyan
+Write-Host "  Bot Fleet Provisioner" -ForegroundColor Cyan
+Write-Host "  Creating: $Name" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Check Hyper-V
+# Must run as admin
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Error "This script must be run as Administrator. Right-click PowerShell > Run as Administrator."
+    exit 1
+}
+
+# Check Hyper-V module
 if (-not (Get-Command "New-VM" -ErrorAction SilentlyContinue)) {
-    Write-Error "Hyper-V PowerShell module not found. Enable Hyper-V first."
+    Write-Error "Hyper-V PowerShell module not found. Run: Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-Management-PowerShell"
     exit 1
 }
 
 # Check virtual switch exists
-$switch = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
-if (-not $switch) {
+$vmSwitch = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
+if (-not $vmSwitch) {
+    Write-Host "Virtual switch '$SwitchName' not found." -ForegroundColor Red
+    Write-Host ""
     Write-Host "Available switches:" -ForegroundColor Yellow
-    Get-VMSwitch | Format-Table Name, SwitchType
-    Write-Error "Virtual switch '$SwitchName' not found. Specify -SwitchName or create one."
+    Get-VMSwitch | Format-Table Name, SwitchType -AutoSize
+    Write-Error "Specify -SwitchName with one of the above."
     exit 1
 }
 
 # Check VM doesn't already exist
 if (Get-VM -Name $Name -ErrorAction SilentlyContinue) {
-    Write-Error "VM '$Name' already exists. Remove it first or pick a different name."
+    Write-Error "VM '$Name' already exists. Remove it first: Remove-VM -Name '$Name' -Force"
     exit 1
 }
 
@@ -110,43 +120,56 @@ if (-not (Test-Path $BaseVHDX)) {
         Write-Host "       This only happens once. Future VMs clone from cache."
         Write-Host ""
 
-        # Use BITS for reliable download with progress
-        Start-BitsTransfer -Source $CloudImageURL -Destination $CloudImageFile -DisplayName "Ubuntu 24.04 Cloud Image"
+        try {
+            Start-BitsTransfer -Source $CloudImageURL -Destination $CloudImageFile -DisplayName "Ubuntu 24.04 Cloud Image"
+        } catch {
+            Write-Host "       BITS transfer failed, falling back to Invoke-WebRequest..." -ForegroundColor Yellow
+            Invoke-WebRequest -Uri $CloudImageURL -OutFile $CloudImageFile -UseBasicParsing
+        }
         Write-Host "       Download complete." -ForegroundColor Green
     } else {
         Write-Host "[1/6] Ubuntu cloud image already cached." -ForegroundColor Green
     }
 
-    # Convert .img to .vhdx
+    # Convert .img (qcow2) to .vhdx
     Write-Host "[1/6] Converting cloud image to VHDX..." -ForegroundColor Yellow
 
-    # Check for qemu-img
-    $qemuImg = Get-Command "qemu-img" -ErrorAction SilentlyContinue
-    if (-not $qemuImg) {
-        # Try common install locations
-        $qemuPaths = @(
-            "C:\Program Files\qemu\qemu-img.exe",
-            "C:\qemu\qemu-img.exe",
-            "$env:ProgramFiles\qemu\qemu-img.exe"
-        )
-        foreach ($p in $qemuPaths) {
+    # Find qemu-img
+    $qemuImg = $null
+    $qemuSearchPaths = @(
+        "C:\Program Files\qemu\qemu-img.exe",
+        "C:\qemu\qemu-img.exe",
+        "$env:ProgramFiles\qemu\qemu-img.exe",
+        "$env:ChocolateyInstall\bin\qemu-img.exe"
+    )
+
+    $qemuCmd = Get-Command "qemu-img" -ErrorAction SilentlyContinue
+    if ($qemuCmd) {
+        $qemuImg = $qemuCmd.Source
+    } else {
+        foreach ($p in $qemuSearchPaths) {
             if (Test-Path $p) { $qemuImg = $p; break }
         }
-    } else {
-        $qemuImg = $qemuImg.Source
     }
 
     if (-not $qemuImg) {
         Write-Host ""
-        Write-Host "  qemu-img not found. Install it:" -ForegroundColor Red
-        Write-Host "    winget install SoftwareFreedomConservancy.QEMU" -ForegroundColor Yellow
-        Write-Host "  Or download from: https://qemu.weilnetz.de/w64/" -ForegroundColor Yellow
+        Write-Host "  ERROR: qemu-img not found." -ForegroundColor Red
         Write-Host ""
-        Write-Host "  After installing, run this script again." -ForegroundColor Red
+        Write-Host "  Install it with:" -ForegroundColor Yellow
+        Write-Host "    winget install SoftwareFreedomConservancy.QEMU" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  Then restart this PowerShell window and run the script again." -ForegroundColor Yellow
         exit 1
     }
 
-    & $qemuImg convert -f qcow2 -O vhdx -o subformat=dynamic $CloudImageFile $BaseVHDX
+    Write-Host "       Using: $qemuImg" -ForegroundColor Gray
+    & $qemuImg convert -f qcow2 -O vhdx -o subformat=dynamic "$CloudImageFile" "$BaseVHDX"
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "qemu-img conversion failed. Check the cloud image file isn't corrupted."
+        exit 1
+    }
     Write-Host "       Base VHDX created." -ForegroundColor Green
 } else {
     Write-Host "[1/6] Base VHDX already cached." -ForegroundColor Green
@@ -157,7 +180,7 @@ if (-not (Test-Path $BaseVHDX)) {
 # ============================================================
 Write-Host "[2/6] Creating VM disk (${DiskSizeGB}GB)..." -ForegroundColor Yellow
 
-Copy-Item $BaseVHDX $VHDX
+Copy-Item $BaseVHDX $VHDX -Force
 Resize-VHD -Path $VHDX -SizeBytes ($DiskSizeGB * 1GB)
 Write-Host "       Disk ready." -ForegroundColor Green
 
@@ -169,11 +192,21 @@ if (-not $SSHPublicKey) {
     New-Item -ItemType Directory -Path $SSHKeyDir -Force | Out-Null
     $keyFile = "$SSHKeyDir\$Name"
 
-    # Generate ed25519 key (no passphrase for automation)
-    ssh-keygen -t ed25519 -f $keyFile -N '""' -C "botfleet-$Name" -q
-    $SSHPublicKey = Get-Content "$keyFile.pub"
+    # Remove existing key files if any (ssh-keygen won't overwrite)
+    if (Test-Path $keyFile) { Remove-Item $keyFile -Force }
+    if (Test-Path "$keyFile.pub") { Remove-Item "$keyFile.pub" -Force }
+
+    # Generate ed25519 key with empty passphrase
+    ssh-keygen -t ed25519 -f $keyFile -N "" -C "botfleet-$Name" -q 2>$null
+
+    if (-not (Test-Path "$keyFile.pub")) {
+        Write-Error "SSH key generation failed. Make sure ssh-keygen is available (comes with Windows 10+)."
+        exit 1
+    }
+
+    $SSHPublicKey = (Get-Content "$keyFile.pub").Trim()
     Write-Host "       Keys saved to: $SSHKeyDir" -ForegroundColor Green
-    Write-Host "       IMPORTANT: Store private key in BWS, then delete local copy." -ForegroundColor Red
+    Write-Host "       >> Store private key in BWS, then delete local copy! <<" -ForegroundColor Red
 } else {
     Write-Host "[3/6] Using provided SSH public key." -ForegroundColor Green
 }
@@ -184,36 +217,35 @@ if (-not $SSHPublicKey) {
 Write-Host "[4/6] Building cloud-init config..." -ForegroundColor Yellow
 
 $ciDir = "$VMDir\cidata"
+if (Test-Path $ciDir) { Remove-Item $ciDir -Recurse -Force }
 New-Item -ItemType Directory -Path $ciDir -Force | Out-Null
 
-# meta-data
-@"
+# meta-data (must be valid YAML)
+$metaData = @"
 instance-id: $Name
 local-hostname: $Name
-"@ | Set-Content "$ciDir\meta-data" -Encoding UTF8 -NoNewline
+"@
+[System.IO.File]::WriteAllText("$ciDir\meta-data", $metaData, [System.Text.UTF8Encoding]::new($false))
 
-# user-data (the big one)
-@"
+# user-data
+$userData = @"
 #cloud-config
 
 hostname: $Name
 manage_etc_hosts: true
 timezone: America/Denver
 
-# Create admin user (no password login — SSH key only)
 users:
   - name: botadmin
-    groups: [sudo, docker]
+    groups: [sudo]
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
     lock_passwd: true
     ssh_authorized_keys:
       - $SSHPublicKey
 
-# Disable password SSH
 ssh_pwauth: false
 
-# Package management
 package_update: true
 package_upgrade: true
 packages:
@@ -229,157 +261,102 @@ packages:
   - jq
   - htop
   - tmux
-  - python3-pip
 
-# Run commands after boot
 runcmd:
-  # ---- SECURITY HARDENING ----
-  # UFW firewall
   - ufw default deny incoming
   - ufw default allow outgoing
   - ufw allow 22/tcp comment 'SSH'
   - ufw --force enable
-
-  # Fail2ban
   - systemctl enable fail2ban
   - systemctl start fail2ban
-
-  # SSH hardening
   - sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+  - sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
   - sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
   - sed -i 's/#MaxAuthTries.*/MaxAuthTries 3/' /etc/ssh/sshd_config
-  - sed -i 's/#ClientAliveInterval.*/ClientAliveInterval 300/' /etc/ssh/sshd_config
   - systemctl restart sshd
-
-  # Auto security updates
   - dpkg-reconfigure -plow unattended-upgrades
-
-  # ---- NODE.JS 22 LTS ----
   - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   - apt-get install -y nodejs
-
-  # ---- OPENCLAW ----
   - npm install -g openclaw
-
-  # ---- BITWARDEN SECRETS CLI ----
-  - curl -fsSL https://github.com/nicholasgasior/bws-cli/releases/latest/download/bws-linux-x86_64 -o /usr/local/bin/bws || true
-  - chmod +x /usr/local/bin/bws || true
-
-  # ---- CREATE OPENCLAW WORKSPACE ----
   - mkdir -p /home/botadmin/.openclaw/workspace
-  - |
-    cat > /home/botadmin/.openclaw/workspace/SOUL.md << 'SOUL'
-    # SOUL.md
-    You are a sales bot in the Humming Agent fleet.
-    Your job is to prospect, enrich leads, and execute outreach.
-    Be resourceful. Be persistent. Report results.
-    SOUL
   - chown -R botadmin:botadmin /home/botadmin/.openclaw
+  - echo "Bot $Name provisioning complete" | tee /var/log/bot-provision.log
 
-  # ---- DONE ----
-  - echo "=== Bot $Name provisioning complete ===" | tee /var/log/bot-provision.log
+final_message: "Bot $Name is LIVE after \$UPTIME seconds."
+"@
+[System.IO.File]::WriteAllText("$ciDir\user-data", $userData, [System.Text.UTF8Encoding]::new($false))
 
-# Phone home when done
-final_message: "Bot $Name is LIVE. Boot took \$UPTIME seconds."
-
-power_state:
-  mode: reboot
-  condition: true
-  timeout: 30
-"@ | Set-Content "$ciDir\user-data" -Encoding UTF8 -NoNewline
-
-# network-config (DHCP)
-@"
+# network-config
+$networkConfig = @"
 version: 2
 ethernets:
   eth0:
     dhcp4: true
-"@ | Set-Content "$ciDir\network-config" -Encoding UTF8 -NoNewline
+"@
+[System.IO.File]::WriteAllText("$ciDir\network-config", $networkConfig, [System.Text.UTF8Encoding]::new($false))
 
-# Build ISO using oscdimg (part of Windows ADK) or mkisofs
+# Build cloud-init ISO
 Write-Host "       Creating cloud-init ISO..." -ForegroundColor Yellow
 
-# Try oscdimg first (Windows ADK)
-$oscdimg = Get-Command "oscdimg" -ErrorAction SilentlyContinue
-if (-not $oscdimg) {
-    $adkPaths = @(
-        "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe",
-        "${env:ProgramFiles}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe"
-    )
-    foreach ($p in $adkPaths) {
-        if (Test-Path $p) { $oscdimg = $p; break }
-    }
-}
+# Find oscdimg (Windows ADK)
+$oscdimgPath = $null
+$adkSearchPaths = @(
+    "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe",
+    "${env:ProgramFiles}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe",
+    "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe"
+)
 
-if ($oscdimg) {
-    $oscdimgPath = if ($oscdimg -is [string]) { $oscdimg } else { $oscdimg.Source }
-    & $oscdimgPath -j2 -lCIDATA "$ciDir" $CloudInitISO
+$oscdimgCmd = Get-Command "oscdimg" -ErrorAction SilentlyContinue
+if ($oscdimgCmd) {
+    $oscdimgPath = $oscdimgCmd.Source
 } else {
-    # Fallback: Use PowerShell to create ISO (no external tools needed)
-    Write-Host "       oscdimg not found, using PowerShell ISO builder..." -ForegroundColor Yellow
-
-    # Inline ISO creator using .NET
-    $isoCreatorCode = @"
-using System;
-using System.IO;
-using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
-
-public class ISOBuilder {
-    public static void CreateISO(string sourcePath, string isoPath, string volumeLabel) {
-        // Use IMAPI2 COM interface
-        Type imageType = Type.GetTypeFromProgID("IMAPI2FS.MsftFileSystemImage");
-        dynamic image = Activator.CreateInstance(imageType);
-        image.FileSystemsToCreate = 2; // ISO 9660 + Joliet
-        image.VolumeName = volumeLabel;
-
-        dynamic rootDir = image.Root;
-        foreach (string file in Directory.GetFiles(sourcePath)) {
-            dynamic stream = Activator.CreateInstance(Type.GetTypeFromProgID("ADODB.Stream"));
-            stream.Open();
-            stream.Type = 1; // Binary
-            stream.LoadFromFile(file);
-            rootDir.AddFile(Path.GetFileName(file), stream);
-        }
-
-        dynamic result = image.CreateResultImage();
-        dynamic isoStream = result.ImageStream;
-
-        // Write to file
-        IStream managedStream = (IStream)isoStream;
-        byte[] buf = new byte[65536];
-        using (FileStream fs = new FileStream(isoPath, FileMode.Create)) {
-            int bytesRead;
-            do {
-                managedStream.Read(buf, buf.Length, IntPtr.Zero);
-                // Check how many bytes were actually read
-                fs.Write(buf, 0, buf.Length);
-            } while (false);
-        }
+    foreach ($p in $adkSearchPaths) {
+        if (Test-Path $p) { $oscdimgPath = $p; break }
     }
 }
-"@
 
-    # Simpler approach: use xorriso via WSL if available, or just tell user to install ADK
-    $wsl = Get-Command "wsl" -ErrorAction SilentlyContinue
-    if ($wsl) {
-        $ciDirWSL = ($ciDir -replace '\\','/') -replace '^C:','/mnt/c'
-        $isoWSL = ($CloudInitISO -replace '\\','/') -replace '^C:','/mnt/c'
-        wsl genisoimage -output $isoWSL -volid CIDATA -joliet -rock $ciDirWSL 2>$null
+if ($oscdimgPath) {
+    Write-Host "       Using oscdimg: $oscdimgPath" -ForegroundColor Gray
+    & $oscdimgPath -j2 -lCIDATA "$ciDir" "$CloudInitISO"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "oscdimg failed to create ISO."
+        exit 1
+    }
+} else {
+    # Fallback: try WSL + genisoimage
+    $wslCmd = Get-Command "wsl" -ErrorAction SilentlyContinue
+    if ($wslCmd) {
+        Write-Host "       oscdimg not found, trying WSL + genisoimage..." -ForegroundColor Yellow
+
+        # Convert Windows paths to WSL paths
+        $ciDirWSL = wsl wslpath -a ($ciDir -replace '\\','/')
+        $isoWSL = wsl wslpath -a ($CloudInitISO -replace '\\','/')
+
+        # Install genisoimage if needed, then create ISO
+        wsl bash -c "which genisoimage > /dev/null 2>&1 || sudo apt-get install -y genisoimage > /dev/null 2>&1"
+        wsl genisoimage -output "$isoWSL" -volid CIDATA -joliet -rock "$ciDirWSL" 2>$null
+
         if ($LASTEXITCODE -ne 0) {
-            wsl sudo apt-get install -y genisoimage 2>$null
-            wsl genisoimage -output $isoWSL -volid CIDATA -joliet -rock $ciDirWSL
+            Write-Error "genisoimage failed. Install Windows ADK: winget install Microsoft.WindowsADK"
+            exit 1
         }
     } else {
         Write-Host ""
-        Write-Host "  Need one of these to create the cloud-init ISO:" -ForegroundColor Red
-        Write-Host "    Option A: Install Windows ADK (includes oscdimg)" -ForegroundColor Yellow
-        Write-Host "      winget install Microsoft.WindowsADK" -ForegroundColor Yellow
-        Write-Host "    Option B: WSL with genisoimage" -ForegroundColor Yellow
-        Write-Host "      wsl --install" -ForegroundColor Yellow
+        Write-Host "  ERROR: No ISO creation tool found." -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  Install Windows ADK:" -ForegroundColor Yellow
+        Write-Host "    winget install Microsoft.WindowsADK" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  Or install WSL:" -ForegroundColor Yellow
+        Write-Host "    wsl --install" -ForegroundColor White
         Write-Host ""
         exit 1
     }
+}
+
+if (-not (Test-Path $CloudInitISO)) {
+    Write-Error "Cloud-init ISO was not created. Check errors above."
+    exit 1
 }
 
 Write-Host "       Cloud-init ISO created." -ForegroundColor Green
@@ -389,7 +366,6 @@ Write-Host "       Cloud-init ISO created." -ForegroundColor Green
 # ============================================================
 Write-Host "[5/6] Creating Hyper-V VM..." -ForegroundColor Yellow
 
-# Create VM
 New-VM -Name $Name `
     -MemoryStartupBytes $RAM `
     -VHDPath $VHDX `
@@ -397,7 +373,6 @@ New-VM -Name $Name `
     -SwitchName $SwitchName `
     -Path $VMPath
 
-# Configure VM
 Set-VM -Name $Name `
     -ProcessorCount $CPUs `
     -DynamicMemory `
@@ -407,10 +382,10 @@ Set-VM -Name $Name `
     -AutomaticStopAction ShutDown `
     -CheckpointType Standard
 
-# Disable Secure Boot (required for Ubuntu cloud image)
+# Disable Secure Boot (required for Ubuntu cloud image — no Microsoft UEFI keys)
 Set-VMFirmware -VMName $Name -EnableSecureBoot Off
 
-# Attach cloud-init ISO
+# Attach cloud-init ISO as DVD
 Add-VMDvdDrive -VMName $Name -Path $CloudInitISO
 
 # Set boot order: HDD first, then DVD
@@ -418,8 +393,8 @@ $hdd = Get-VMHardDiskDrive -VMName $Name
 $dvd = Get-VMDvdDrive -VMName $Name
 Set-VMFirmware -VMName $Name -BootOrder $hdd, $dvd
 
-# Enable guest services (for file copy, heartbeat)
-Enable-VMIntegrationService -VMName $Name -Name "Guest Service Interface"
+# Enable guest integration services
+Enable-VMIntegrationService -VMName $Name -Name "Guest Service Interface" -ErrorAction SilentlyContinue
 
 Write-Host "       VM created and configured." -ForegroundColor Green
 
@@ -429,46 +404,68 @@ Write-Host "       VM created and configured." -ForegroundColor Green
 Write-Host "[6/6] Starting VM..." -ForegroundColor Yellow
 Start-VM -Name $Name
 
+# Wait a moment then try to get IP
+Write-Host ""
+Write-Host "       Waiting for VM to get an IP address..." -ForegroundColor Yellow
+$ip = $null
+for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 5
+    $adapter = Get-VMNetworkAdapter -VMName $Name
+    $ips = $adapter.IPAddresses | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }
+    if ($ips) {
+        $ip = $ips[0]
+        break
+    }
+    Write-Host "       ... still waiting ($($i * 5)s)" -ForegroundColor Gray
+}
+
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
-Write-Host " VM '$Name' is BOOTING" -ForegroundColor Green
+Write-Host "  Phoenix is ALIVE" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
-Write-Host ""
-Write-Host " Cloud-init is now:" -ForegroundColor Cyan
-Write-Host "   - Updating packages" -ForegroundColor Cyan
-Write-Host "   - Installing Node.js 22 + OpenClaw" -ForegroundColor Cyan
-Write-Host "   - Hardening SSH + UFW + Fail2ban" -ForegroundColor Cyan
-Write-Host "   - Setting up workspace" -ForegroundColor Cyan
-Write-Host ""
-Write-Host " This takes 3-5 minutes. Then:" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "   1. Get the VM's IP:" -ForegroundColor White
-Write-Host "      Get-VMNetworkAdapter -VMName $Name | Select IPAddresses" -ForegroundColor Gray
-Write-Host ""
-Write-Host "   2. SSH in:" -ForegroundColor White
-Write-Host "      ssh -i `"$SSHKeyDir\$Name`" botadmin@<IP>" -ForegroundColor Gray
-Write-Host ""
-Write-Host "   3. Check provisioning log:" -ForegroundColor White
-Write-Host "      cat /var/log/cloud-init-output.log" -ForegroundColor Gray
-Write-Host ""
-Write-Host "   4. Configure OpenClaw:" -ForegroundColor White
-Write-Host "      openclaw init" -ForegroundColor Gray
-Write-Host ""
-Write-Host " SSH private key: $SSHKeyDir\$Name" -ForegroundColor Red
-Write-Host " Store this in BWS immediately, then delete the local copy." -ForegroundColor Red
 Write-Host ""
 
-# Output summary for inventory
+if ($ip) {
+    Write-Host "  IP Address: $ip" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  SSH in (after cloud-init finishes, ~3-5 min):" -ForegroundColor White
+    Write-Host "    ssh -i `"$SSHKeyDir\$Name`" botadmin@$ip" -ForegroundColor Yellow
+} else {
+    Write-Host "  IP not assigned yet. Check manually:" -ForegroundColor Yellow
+    Write-Host "    Get-VMNetworkAdapter -VMName $Name | Select IPAddresses" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  Then SSH in:" -ForegroundColor White
+    Write-Host "    ssh -i `"$SSHKeyDir\$Name`" botadmin@<IP>" -ForegroundColor Yellow
+}
+
+Write-Host ""
+Write-Host "  Cloud-init is still installing packages (~3-5 min)." -ForegroundColor Cyan
+Write-Host "  Check progress after SSH:" -ForegroundColor Cyan
+Write-Host "    sudo cloud-init status --wait" -ForegroundColor Gray
+Write-Host "    cat /var/log/cloud-init-output.log" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  Then configure OpenClaw:" -ForegroundColor White
+Write-Host "    openclaw init" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  SSH private key: $SSHKeyDir\$Name" -ForegroundColor Red
+Write-Host "  >> STORE IN BWS, THEN DELETE LOCAL COPY <<" -ForegroundColor Red
+Write-Host ""
+
+# Save VM info for inventory
 $summary = @{
-    Name = $Name
-    RAM = "$($RAM / 1GB)GB"
-    CPUs = $CPUs
-    Disk = "${DiskSizeGB}GB"
-    VHDX = $VHDX
-    SSHKey = "$SSHKeyDir\$Name"
-    Created = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-    Status = "Provisioning"
+    Name       = $Name
+    RAM        = "$($RAM / 1GB)GB"
+    CPUs       = $CPUs
+    Disk       = "${DiskSizeGB}GB"
+    VHDX       = $VHDX
+    IP         = if ($ip) { $ip } else { "pending" }
+    SSHKeyPath = "$SSHKeyDir\$Name"
+    SSHUser    = "botadmin"
+    Switch     = $SwitchName
+    Created    = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+    Status     = "Provisioning"
 }
 
 $summary | ConvertTo-Json | Set-Content "$VMDir\vm-info.json"
-Write-Host " VM info saved to: $VMDir\vm-info.json" -ForegroundColor Gray
+Write-Host "  VM info saved: $VMDir\vm-info.json" -ForegroundColor Gray
+Write-Host ""
