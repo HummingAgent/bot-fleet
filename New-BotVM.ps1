@@ -46,9 +46,15 @@ param(
 
     [string]$VMPath = "D:\BotFleet",
 
-    [string]$SwitchName = "Broadcom NetXtreme Gigabit Ethernet #2 - Virtual Switch",
+    [string]$SwitchName = "BotFleet NAT",
 
-    [string]$SSHPublicKey = ""
+    [string]$SSHPublicKey = "",
+
+    [string]$StaticIP = "10.10.10.100",
+
+    [string]$Gateway = "10.10.10.1",
+
+    [string]$DNS = "8.8.8.8"
 )
 
 $ErrorActionPreference = "Stop"
@@ -241,11 +247,14 @@ users:
     groups: [sudo]
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
-    lock_passwd: true
+    lock_passwd: false
+    plain_text_passwd: botfleet
     ssh_authorized_keys:
       - $SSHPublicKey
 
-ssh_pwauth: false
+ssh_pwauth: true
+chpasswd:
+  expire: false
 
 package_update: true
 package_upgrade: true
@@ -288,12 +297,28 @@ final_message: "Bot $Name is LIVE after \$UPTIME seconds."
 [System.IO.File]::WriteAllText("$ciDir\user-data", $userData, [System.Text.UTF8Encoding]::new($false))
 
 # network-config
-$networkConfig = @"
+if ($StaticIP) {
+    $networkConfig = @"
+version: 2
+ethernets:
+  eth0:
+    dhcp4: false
+    addresses:
+      - $StaticIP/24
+    routes:
+      - to: default
+        via: $Gateway
+    nameservers:
+      addresses: [$DNS]
+"@
+} else {
+    $networkConfig = @"
 version: 2
 ethernets:
   eth0:
     dhcp4: true
 "@
+}
 [System.IO.File]::WriteAllText("$ciDir\network-config", $networkConfig, [System.Text.UTF8Encoding]::new($false))
 
 # Build cloud-init ISO
