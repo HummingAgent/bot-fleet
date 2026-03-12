@@ -1,0 +1,28 @@
+{
+  "gateway": {
+    "mode": "local",
+    "port": 18789,
+    "auth": {
+      "mode": "token",
+      "token": "CHANGE-ME-random-secret"
+    }
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "~/.openclaw/workspace",
+      "model": {
+        "primary": "google/gemini-2.5-pro"
+      }
+    }
+  },
+  "channels": {
+    "slack": {
+      "enabled": true,
+      "botToken": "xoxb-YOUR-BOT-TOKEN",
+      "appToken": "xapp-YOUR-APP-TOKEN"
+    }
+  },
+  "env": {
+    "GOOGLE_API_KEY": "YOUR-GEMINI-API-KEY"
+  }
+}

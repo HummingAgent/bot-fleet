@@ -29,8 +29,17 @@
 .PARAMETER SSHPublicKey
     SSH public key for the admin user. If not provided, generates a new keypair.
 
+.PARAMETER OpenClawConfig
+    Path to an openclaw.json config file. If provided, the config is injected
+    into the VM and the gateway is started automatically on first boot.
+
+.PARAMETER StaticMemory
+    Use static (fixed) memory instead of dynamic. Recommended for OpenClaw bots
+    to prevent OOM from dynamic memory starting at minimum.
+
 .EXAMPLE
-    .\New-BotVM.ps1 -Name "phoenix"
+    .\New-BotVM.ps1 -Name "phoenix" -StaticMemory
+    .\New-BotVM.ps1 -Name "phoenix" -StaticMemory -OpenClawConfig "D:\BotFleet\configs\phoenix.json"
     .\New-BotVM.ps1 -Name "sales-bot-01" -RAM 2GB -CPUs 2
 #>
 
@@ -54,7 +63,11 @@ param(
 
     [string]$Gateway = "10.10.10.1",
 
-    [string]$DNS = "8.8.8.8"
+    [string]$DNS = "8.8.8.8",
+
+    [string]$OpenClawConfig = "",
+
+    [switch]$StaticMemory
 )
 
 $ErrorActionPreference = "Stop"
@@ -290,10 +303,31 @@ runcmd:
   - npm install -g openclaw
   - mkdir -p /home/botadmin/.openclaw/workspace
   - chown -R botadmin:botadmin /home/botadmin/.openclaw
+  - echo "OpenClaw config will be injected by provisioner"
   - echo "Bot $Name provisioning complete" | tee /var/log/bot-provision.log
 
 final_message: "Bot $Name is LIVE after \$UPTIME seconds."
 "@
+# Inject OpenClaw config into cloud-init if provided
+if ($OpenClawConfig -and (Test-Path $OpenClawConfig)) {
+    Write-Host "       Injecting OpenClaw config from: $OpenClawConfig" -ForegroundColor Cyan
+    $configJson = (Get-Content $OpenClawConfig -Raw).Trim()
+    # Escape for YAML heredoc
+    $configJsonEscaped = $configJson -replace "'", "''"
+    $ocRuncmd = @"
+  - |
+    cat << 'OCCONFIG' > /home/botadmin/.openclaw/openclaw.json
+$configJson
+OCCONFIG
+    chown botadmin:botadmin /home/botadmin/.openclaw/openclaw.json
+  - su - botadmin -c 'openclaw gateway install' || true
+  - su - botadmin -c 'openclaw gateway start' || true
+"@
+    $userData = $userData -replace "  - echo `"OpenClaw config will be injected by provisioner`"", $ocRuncmd
+} else {
+    $userData = $userData -replace "  - echo `"OpenClaw config will be injected by provisioner`"", "  - echo `"No OpenClaw config provided. Run: openclaw init`""
+}
+
 [System.IO.File]::WriteAllText("$ciDir\user-data", $userData, [System.Text.UTF8Encoding]::new($false))
 
 # network-config
@@ -399,14 +433,23 @@ New-VM -Name $Name `
     -SwitchName $SwitchName `
     -Path $VMPath
 
-Set-VM -Name $Name `
-    -ProcessorCount $CPUs `
-    -DynamicMemory `
-    -MemoryMinimumBytes 1GB `
-    -MemoryMaximumBytes $RAM `
-    -AutomaticStartAction Start `
-    -AutomaticStopAction ShutDown `
-    -CheckpointType Standard
+if ($StaticMemory) {
+    Set-VM -Name $Name `
+        -ProcessorCount $CPUs `
+        -StaticMemory `
+        -AutomaticStartAction Start `
+        -AutomaticStopAction ShutDown `
+        -CheckpointType Standard
+} else {
+    Set-VM -Name $Name `
+        -ProcessorCount $CPUs `
+        -DynamicMemory `
+        -MemoryMinimumBytes ([math]::Max($RAM / 2, 2GB)) `
+        -MemoryMaximumBytes $RAM `
+        -AutomaticStartAction Start `
+        -AutomaticStopAction ShutDown `
+        -CheckpointType Standard
+}
 
 # Disable Secure Boot (required for Ubuntu cloud image — no Microsoft UEFI keys)
 Set-VMFirmware -VMName $Name -EnableSecureBoot Off
@@ -470,8 +513,12 @@ Write-Host "  Check progress after SSH:" -ForegroundColor Cyan
 Write-Host "    sudo cloud-init status --wait" -ForegroundColor Gray
 Write-Host "    cat /var/log/cloud-init-output.log" -ForegroundColor Gray
 Write-Host ""
-Write-Host "  Then configure OpenClaw:" -ForegroundColor White
-Write-Host "    openclaw init" -ForegroundColor Gray
+if ($OpenClawConfig) {
+    Write-Host "  OpenClaw config injected — gateway will start automatically!" -ForegroundColor Green
+} else {
+    Write-Host "  Then configure OpenClaw:" -ForegroundColor White
+    Write-Host "    openclaw init" -ForegroundColor Gray
+}
 Write-Host ""
 Write-Host "  SSH private key: $SSHKeyDir\$Name" -ForegroundColor Red
 Write-Host "  >> STORE IN BWS, THEN DELETE LOCAL COPY <<" -ForegroundColor Red

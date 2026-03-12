@@ -1,0 +1,4 @@
+# Ignore all config files except the example template
+*
+!.gitignore
+!example.json
