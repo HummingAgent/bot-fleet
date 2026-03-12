@@ -197,7 +197,8 @@ if (-not $SSHPublicKey) {
     if (Test-Path "$keyFile.pub") { Remove-Item "$keyFile.pub" -Force }
 
     # Generate ed25519 key with empty passphrase
-    ssh-keygen -t ed25519 -f $keyFile -N "" -C "botfleet-$Name" -q 2>$null
+    # Use """" for PowerShell to pass empty string to native command
+    ssh-keygen -t ed25519 -f $keyFile -C "botfleet-$Name" -q -P """"
 
     if (-not (Test-Path "$keyFile.pub")) {
         Write-Error "SSH key generation failed. Make sure ssh-keygen is available (comes with Windows 10+)."
