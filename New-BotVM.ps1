@@ -312,17 +312,23 @@ final_message: "Bot $Name is LIVE after \$UPTIME seconds."
 if ($OpenClawConfig -and (Test-Path $OpenClawConfig)) {
     Write-Host "       Injecting OpenClaw config from: $OpenClawConfig" -ForegroundColor Cyan
     $configJson = (Get-Content $OpenClawConfig -Raw).Trim()
-    # Escape for YAML heredoc
-    $configJsonEscaped = $configJson -replace "'", "''"
-    $ocRuncmd = @"
-  - |
-    cat << 'OCCONFIG' > /home/botadmin/.openclaw/openclaw.json
-$configJson
-OCCONFIG
-    chown botadmin:botadmin /home/botadmin/.openclaw/openclaw.json
-  - su - botadmin -c 'openclaw gateway install' || true
-  - su - botadmin -c 'openclaw gateway start' || true
+    # Indent config JSON for YAML embedding (each line gets 6 spaces)
+    $indentedJson = ($configJson -split "`n" | ForEach-Object { "      $_" }) -join "`n"
+    # Add write_files section before runcmd to write the config
+    $writeFiles = @"
+
+write_files:
+  - path: /home/botadmin/.openclaw/openclaw.json
+    owner: botadmin:botadmin
+    permissions: '0644'
+    content: |
+$indentedJson
+
 "@
+    # Insert write_files before runcmd
+    $userData = $userData -replace "runcmd:", ($writeFiles + "runcmd:")
+    # Replace placeholder with gateway start commands
+    $ocRuncmd = "  - su - botadmin -c 'openclaw gateway install' || true`n  - su - botadmin -c 'openclaw gateway start' || true"
     $userData = $userData -replace "  - echo `"OpenClaw config will be injected by provisioner`"", $ocRuncmd
 } else {
     $userData = $userData -replace "  - echo `"OpenClaw config will be injected by provisioner`"", "  - echo `"No OpenClaw config provided. Run: openclaw init`""
