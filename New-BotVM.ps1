@@ -46,7 +46,7 @@ param(
 
     [string]$VMPath = "D:\BotFleet",
 
-    [string]$SwitchName = "Default Switch",
+    [string]$SwitchName = "Broadcom NetXtreme Gigabit Ethernet #2 - Virtual Switch",
 
     [string]$SSHPublicKey = ""
 )
