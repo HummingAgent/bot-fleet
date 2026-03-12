@@ -226,7 +226,7 @@ if (-not $SSHPublicKey) {
 
     $SSHPublicKey = (Get-Content "$keyFile.pub").Trim()
     Write-Host "       Keys saved to: $SSHKeyDir" -ForegroundColor Green
-    Write-Host "       >> Store private key in BWS, then delete local copy! <<" -ForegroundColor Red
+    Write-Host "       ** Store private key in BWS, then delete local copy! **" -ForegroundColor Red
 } else {
     Write-Host "[3/6] Using provided SSH public key." -ForegroundColor Green
 }
@@ -527,7 +527,7 @@ if ($OpenClawConfig) {
 }
 Write-Host ""
 Write-Host "  SSH private key: $SSHKeyDir\$Name" -ForegroundColor Red
-Write-Host "  >> STORE IN BWS, THEN DELETE LOCAL COPY <<" -ForegroundColor Red
+Write-Host "  ** STORE IN BWS, THEN DELETE LOCAL COPY **" -ForegroundColor Red
 Write-Host ""
 
 # Save VM info for inventory
